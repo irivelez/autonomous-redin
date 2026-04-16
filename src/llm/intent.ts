@@ -201,7 +201,7 @@ export async function interpretWithLLM(input: InterpretInput): Promise<IntentRes
       responseMimeType: "application/json",
       responseSchema: RESPONSE_SCHEMA,
       temperature: 0.3,
-      maxOutputTokens: 800,
+      maxOutputTokens: 2000,
     },
   });
 

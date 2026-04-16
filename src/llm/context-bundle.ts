@@ -138,21 +138,49 @@ export function renderBundleForPrompt(bundle: OpsBundle): string {
     if (bundle.high.length > 6) parts.push(`  ... y ${bundle.high.length - 6} más.`);
   }
 
-  if (bundle.interSLAActive.length > 0) {
-    parts.push(`\n🚨 INTER RAPIDÍSIMO activas (${bundle.interSLAActive.length}) — SLAs con multa:`);
-    for (const ot of bundle.interSLAActive.slice(0, 10)) {
+  // Execution pipeline with values, sorted by value DESC. Top 30 to keep prompt small.
+  if (bundle.executionOTs.length > 0) {
+    const sortedExec = [...bundle.executionOTs].sort(
+      (a, b) => (parseFloat(b.Valor_Estimado || "0") || 0) - (parseFloat(a.Valor_Estimado || "0") || 0)
+    );
+    const shown = sortedExec.slice(0, 30);
+    parts.push(`\n⚡ OTS EN EJECUCIÓN / COORDINAR / POR APROBAR (${sortedExec.length} total, mostrando top ${shown.length} por valor):`);
+    for (const ot of shown) {
+      const v = Math.round((parseFloat(ot.Valor_Estimado || "0") || 0) / 1000);
       parts.push(
-        `  • #${ot.Numero_Orden} ${ot.Ciudad.padEnd(16)} ${ot.Estado.padEnd(24)} Resp:${ot.Alerta_Respuesta || "—"} Sol:${ot.Alerta_Solucion || "—"} (${ot.Nombre_Arquitecto_Real || "—"})`
+        `  • #${ot.Numero_Orden} ${ot.Ciudad} | ${ot.Estado} | $${v}k | ${ot.ID_Cliente} | Arq:${ot.Nombre_Arquitecto_Real || "—"}`
       );
     }
+    if (sortedExec.length > shown.length) parts.push(`  ... y ${sortedExec.length - shown.length} más con menor valor.`);
+  }
+
+  if (bundle.interSLAActive.length > 0) {
+    // Sort with breached SLAs first, then by value desc
+    const sortedInter = [...bundle.interSLAActive].sort((a, b) => {
+      const aB = (a.Alerta_Respuesta?.includes("❌") || a.Alerta_Solucion?.includes("❌")) ? 1 : 0;
+      const bB = (b.Alerta_Respuesta?.includes("❌") || b.Alerta_Solucion?.includes("❌")) ? 1 : 0;
+      if (aB !== bB) return bB - aB;
+      return (parseFloat(b.Valor_Estimado || "0") || 0) - (parseFloat(a.Valor_Estimado || "0") || 0);
+    });
+    const shown = sortedInter.slice(0, 20);
+    parts.push(`\n🚨 INTER RAPIDÍSIMO activas (${sortedInter.length} total, top ${shown.length} por SLA breach + valor):`);
+    for (const ot of shown) {
+      const v = Math.round((parseFloat(ot.Valor_Estimado || "0") || 0) / 1000);
+      parts.push(
+        `  • #${ot.Numero_Orden} ${ot.Ciudad} | ${ot.Estado} | $${v}k | Resp:${ot.Alerta_Respuesta || "—"} Sol:${ot.Alerta_Solucion || "—"} | Arq:${ot.Nombre_Arquitecto_Real || "—"}`
+      );
+    }
+    if (sortedInter.length > shown.length) parts.push(`  ... y ${sortedInter.length - shown.length} más.`);
   }
 
   if (bundle.pendingApproval.length > 0) {
-    parts.push(`\n📋 Por aprobar por cliente (${bundle.pendingApproval.length}):`);
-    for (const ot of bundle.pendingApproval.slice(0, 5)) {
+    const shown = bundle.pendingApproval.slice(0, 15);
+    parts.push(`\n📋 Por aprobar por cliente (${bundle.pendingApproval.length} total, mostrando ${shown.length}):`);
+    for (const ot of shown) {
       const d = ot.TS_PorAprobar ? new Date(ot.TS_PorAprobar) : null;
       const days = d && !isNaN(d.getTime()) ? Math.floor((Date.now() - d.getTime()) / 86400000) : "?";
-      parts.push(`  • #${ot.Numero_Orden} ${ot.Ciudad} — ${days}d esperando (${ot.Nombre_Arquitecto_Real || "—"})`);
+      const v = Math.round((parseFloat(ot.Valor_Estimado || "0") || 0) / 1000);
+      parts.push(`  • #${ot.Numero_Orden} ${ot.Ciudad} | ${days}d esperando | $${v}k | ${ot.ID_Cliente} | Arq:${ot.Nombre_Arquitecto_Real || "—"}`);
     }
   }
 
