@@ -40,11 +40,23 @@ export class WhatsAppClient extends EventEmitter {
     await this.createConnection();
   }
 
+  private wipeAuthDir(): void {
+    try {
+      if (fs.existsSync(AUTH_DIR)) {
+        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        console.log(`[WhatsApp] Auth directory wiped: ${AUTH_DIR}`);
+      }
+    } catch (err) {
+      console.error("[WhatsApp] Error wiping auth dir:", err);
+    }
+  }
+
   private async createConnection(): Promise<void> {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`[WhatsApp] Using WA v${version.join(".")} (latest: ${isLatest})`);
+    console.log(`[WhatsApp] Auth registered: ${state.creds.registered}`);
 
     const sock = makeWASocket({
       version,
@@ -59,32 +71,30 @@ export class WhatsAppClient extends EventEmitter {
 
     sock.ev.on("creds.update", saveCreds);
 
-    // Pairing code flow: if PAIRING_PHONE env var is set, request a pairing code
-    // instead of QR. Enter the 8-digit code in WhatsApp → Linked Devices → Link with phone number.
-    const pairingPhone = process.env.PAIRING_PHONE;
-    if (pairingPhone && !sock.authState.creds.registered) {
-      setTimeout(async () => {
-        try {
-          const code = await sock.requestPairingCode(pairingPhone.replace(/[^0-9]/g, ""));
-          console.log(`\n[WhatsApp] ═══════════════════════════════════════`);
-          console.log(`[WhatsApp] CÓDIGO DE VINCULACIÓN: ${code}`);
-          console.log(`[WhatsApp] ═══════════════════════════════════════`);
-          console.log(`[WhatsApp] En WhatsApp del teléfono ${pairingPhone}:`);
-          console.log(`[WhatsApp] Ajustes → Dispositivos vinculados → Vincular con número de teléfono`);
-          console.log(`[WhatsApp] Ingresa el código arriba.\n`);
-        } catch (err) {
-          console.error("[WhatsApp] Error solicitando pairing code:", err);
-        }
-      }, 3000);
-    }
-
-    sock.ev.on("connection.update", (update) => {
+    sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
         console.log("\n[WhatsApp] Escanea este QR con WhatsApp (Dispositivos vinculados):\n");
         qrcode.generate(qr, { small: true });
         this.emit("qr", qr);
+
+        // Request pairing code AFTER the socket is ready (QR event = socket is alive and waiting)
+        const pairingPhone = process.env.PAIRING_PHONE;
+        if (pairingPhone) {
+          try {
+            const code = await sock.requestPairingCode(pairingPhone.replace(/[^0-9]/g, ""));
+            const formatted = code.match(/.{1,4}/g)?.join("-") || code;
+            console.log(`\n[WhatsApp] ═══════════════════════════════════════`);
+            console.log(`[WhatsApp] CÓDIGO DE VINCULACIÓN: ${formatted}`);
+            console.log(`[WhatsApp] ═══════════════════════════════════════`);
+            console.log(`[WhatsApp] En WhatsApp del teléfono ${pairingPhone}:`);
+            console.log(`[WhatsApp] Ajustes → Dispositivos vinculados → Vincular con número de teléfono`);
+            console.log(`[WhatsApp] Ingresa el código arriba.\n`);
+          } catch (err) {
+            console.error("[WhatsApp] Error solicitando pairing code:", err);
+          }
+        }
       }
 
       if (connection === "open") {
@@ -98,8 +108,12 @@ export class WhatsAppClient extends EventEmitter {
         const loggedOut = statusCode === DisconnectReason.loggedOut;
 
         if (loggedOut) {
-          console.log("[WhatsApp] Sesión cerrada. Elimina la carpeta de auth y vuelve a escanear el QR.");
+          console.log("[WhatsApp] Sesión cerrada por WhatsApp. Limpiando auth y reiniciando pairing...");
+          this.wipeAuthDir();
           this.emit("logged_out");
+          if (this.running) {
+            setTimeout(() => this.createConnection(), 2000);
+          }
           return;
         }
 
