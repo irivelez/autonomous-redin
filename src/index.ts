@@ -3,6 +3,7 @@ import { AppSheetClient } from "./clients/appsheet.js";
 import { WhatsAppClient, type IncomingMessage } from "./clients/whatsapp.js";
 import { ExecutionMonitor, formatAlerts } from "./tracker/monitor.js";
 import { interpretMessage, generateReply } from "./tracker/interpreter.js";
+import { startPairServer } from "./cli/pair-server.js";
 import cron from "node-cron";
 
 const appsheet = new AppSheetClient({
@@ -62,6 +63,11 @@ async function main() {
   console.log("═══════════════════════════════════════");
   console.log("  REDIN Execution Tracker — Starting   ");
   console.log("═══════════════════════════════════════\n");
+
+  // Start pair server FIRST so it's reachable while Baileys is generating the QR.
+  // Railway provides PORT; use 3000 locally.
+  const port = parseInt(process.env.PORT || "3000", 10);
+  startPairServer({ port, whatsapp, authToken: process.env.PAIR_TOKEN });
 
   // Run initial scan
   await runScan();

@@ -33,6 +33,24 @@ export class WhatsAppClient extends EventEmitter {
   private handler: MessageHandler | null = null;
   private reconnectAttempts = 0;
   private running = false;
+  private latestQR: string | null = null;
+  private connectionState: "pending" | "open" | "closed" = "pending";
+
+  getLatestQR(): string | null {
+    return this.latestQR;
+  }
+
+  getConnectionState(): "pending" | "open" | "closed" {
+    return this.connectionState;
+  }
+
+  hasPersistedAuth(): boolean {
+    try {
+      return fs.existsSync(path.join(AUTH_DIR, "creds.json"));
+    } catch {
+      return false;
+    }
+  }
 
   async connect(handler: MessageHandler): Promise<void> {
     this.handler = handler;
@@ -101,7 +119,9 @@ export class WhatsAppClient extends EventEmitter {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log("\n[WhatsApp] Escanea este QR con WhatsApp (Dispositivos vinculados):\n");
+        this.latestQR = qr;
+        this.connectionState = "pending";
+        console.log("\n[WhatsApp] QR generado. Escanéalo desde la URL pública /pair (o desde la terminal abajo):\n");
         qrcode.generate(qr, { small: true });
         this.emit("qr", qr);
 
@@ -126,16 +146,20 @@ export class WhatsAppClient extends EventEmitter {
       if (connection === "open") {
         console.log("[WhatsApp] Conectado correctamente");
         this.reconnectAttempts = 0;
+        this.latestQR = null;
+        this.connectionState = "open";
         this.emit("connected");
       }
 
       if (connection === "close") {
+        this.connectionState = "closed";
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
         const loggedOut = statusCode === DisconnectReason.loggedOut;
 
         if (loggedOut) {
           console.log("[WhatsApp] Sesión cerrada por WhatsApp. Limpiando auth y reiniciando pairing...");
           this.wipeAuthDir();
+          this.latestQR = null;
           this.emit("logged_out");
           if (this.running) {
             setTimeout(() => this.createConnection(), 2000);
@@ -242,7 +266,14 @@ export class WhatsAppClient extends EventEmitter {
   }
 
   isConnected(): boolean {
-    return this.sock !== null;
+    return this.sock !== null && this.connectionState === "open";
+  }
+
+  async requestPairingCode(phone: string): Promise<string> {
+    if (!this.sock) throw new Error("Socket not initialized");
+    const digits = phone.replace(/[^0-9]/g, "");
+    const code = await this.sock.requestPairingCode(digits);
+    return code;
   }
 
   private chunkText(text: string, limit: number): string[] {

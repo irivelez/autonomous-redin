@@ -65,21 +65,34 @@ Baileys is not webhook-based. It maintains a persistent WebSocket connection to 
    APPSHEET_ACCESS_KEY=V2-...
    MANAGER_WHATSAPP=573166222563
    WA_AUTH_DIR=/data/whatsapp-auth
+   PAIR_TOKEN=<random 24+ char string>      # protects /pair URL — anyone who hits it without ?t=<token> gets 401
    ```
+   `PORT` is auto-injected by Railway — do not set it manually.
 
 4. **Attach a persistent volume** (critical for WhatsApp auth):
    - Railway dashboard → Settings → Volumes → New Volume
    - Mount path: `/data/whatsapp-auth`
    - Size: 1GB is plenty
 
-5. **First deploy — pair WhatsApp:**
-   - Open Railway logs
-   - A QR code will print in the terminal
+5. **Generate a public URL:**
+   - Railway dashboard → Settings → Networking → Generate Domain
+   - You'll get something like `redin-agent-production.up.railway.app`
+
+6. **First deploy — pair WhatsApp via the browser:**
+   - Open `https://<your-railway-domain>/pair?t=<PAIR_TOKEN>` in a browser
+   - The page shows a live QR (rotates every ~20s, page auto-refreshes every 15s)
    - Open WhatsApp on the Redin phone → Settings → Linked Devices → Link a Device
-   - Scan the QR
+   - Scan the QR — page flips to "✅ Conectado"
    - Credentials are saved to the volume — no re-scan needed ever again
 
-6. **Subsequent deploys:** just `git push`. The volume preserves the WhatsApp session across redeploys.
+   **No camera?** Use pairing code instead:
+   `https://<your-railway-domain>/pair-code?phone=573166222563&t=<PAIR_TOKEN>`
+   then enter the 8-digit code in WhatsApp → Linked Devices → Link with phone number.
+
+7. **Subsequent deploys:** just `git push`. The volume preserves the WhatsApp session across redeploys. The /pair URL stays live but does nothing unless the session is lost.
+
+> Why a browser flow instead of pasting `creds.json` as an env var?
+> Baileys' generated `creds.json` (even after pruning) is too large for Railway's env var UI to handle reliably (truncation, paste failures). Pairing directly on the deployed instance writes auth straight to the volume — zero credential transfer.
 
 ### Cost: ~$5-7/month
 
