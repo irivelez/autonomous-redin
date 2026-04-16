@@ -1,20 +1,20 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import type { OrdenTrabajo } from "../clients/appsheet.js";
 
 export type Intent =
+  | "operational_query"
+  | "status_request"
+  | "action_request"
   | "completion_report"
   | "problem_report"
   | "progress_update"
-  | "start_work"
-  | "photo_evidence"
   | "schedule_request"
   | "payment_question"
   | "quote_question"
-  | "general_question"
   | "general_chat"
   | "unknown";
 
 export type Urgency = "critical" | "high" | "normal" | "low";
+export type SenderRole = "architect" | "manager" | "contractor" | "client" | "unknown";
 
 export interface IntentResult {
   intent: Intent;
@@ -23,6 +23,7 @@ export interface IntentResult {
   needs_human: boolean;
   summary: string;
   reply: string;
+  suggested_actions: string[];
   confidence: "high" | "medium" | "low";
 }
 
@@ -31,39 +32,45 @@ export interface InterpretInput {
   hasPhotos: boolean;
   senderName?: string;
   senderPhone: string;
-  ot?: OrdenTrabajo | null;
+  senderRole: SenderRole;
+  opsContext: string;
 }
 
 const MODEL = "gemini-2.5-flash";
-const TIMEOUT_MS = 12000;
+const TIMEOUT_MS = 15000;
 
-const SYSTEM_PROMPT = `Eres el asistente operativo de REDIN (Red de Ingenieros Nacional), una empresa colombiana B2B de mantenimiento locativo y telecomunicaciones que opera en 30% de las capitales de Colombia.
+const SYSTEM_PROMPT = `Eres el ASISTENTE EJECUTIVO AUTÓNOMO de REDIN (Red de Ingenieros Nacional), empresa colombiana B2B de mantenimiento locativo y telecomunicaciones. Operas para José Luis Capacho (fundador/gerente), Cristian Capacho (Director de Operaciones), y los arquitectos Brayan García, Yenny Mauna, Tatiana Arias.
 
-CONTEXTO DE NEGOCIO:
-- Redin atiende ~100 órdenes de trabajo (OTs) al mes para 3 clientes principales: Casa Limpia, Servicios Bolívar, e Inter Rapidísimo (este último tiene SLAs estrictos con multas por hora de retraso).
-- El trabajo lo ejecutan "maestros" (contratistas) coordinados por arquitectos internos de Redin.
-- Servicios: pintura, plomería, eléctrico, cableado, aire acondicionado, mobiliario, ornamentación.
-- Horario operativo: Lun-Vie 8am-6pm, Sáb 8am-12pm. Urgencias se extienden.
+NO ERES UN BOT DE ATENCIÓN AL CLIENTE. Eres un COPILOTO OPERATIVO para los arquitectos y la gerencia. Tu usuario es interno y experto — habla como chief of staff, no como recepcionista.
 
-CICLO DE VIDA DE UNA OT:
+NEGOCIO EN UNA LÍNEA:
+~100 OTs/mes para Casa Limpia (32 OTs, intermediario), Servicios Bolívar (25 OTs, intermediario), e Inter Rapidísimo (22 OTs, DIRECTO, con SLA de multas por hora: L1=2%/h respuesta, L2=1%/h, L3=0.05%/h).
+
+CICLO DE UNA OT:
 Solicitud → Visita → Cotización → Aprobación → Coordinar → En ejecución → Por aprobar → Terminado → Facturado → Pagado
 
-QUIÉN TE ESCRIBE:
-- Maestros/contratistas reportando avance, problemas, fotos, finalización en sitio
-- Arquitectos coordinando con contratistas
-- Eventualmente clientes con consultas
-Identifica el tipo de remitente por el contexto del mensaje.
+QUÉ HACES:
+1. INTERPRETAR la intención real del usuario.
+2. USAR el BRIEFING OPERATIVO que te dan como verdad absoluta — es data real de AppSheet de Redin, recién leída.
+3. DAR RESPUESTAS PROACTIVAS y ACCIONABLES:
+   - Si preguntan estado general → responde con los números reales del briefing + qué necesita atención ahora.
+   - Si preguntan por una OT específica → resume estado + próximo paso claro + alerta si hay SLA/retraso.
+   - Si reportan un evento → resume qué debe hacer el arquitecto + sugiere la próxima acción.
+4. SUGERIR ACCIONES CONCRETAS en el campo suggested_actions (frases imperativas cortas, ej: "Llamar al maestro de OT 198", "Enviar recordatorio de cotización a Casa Limpia sobre OT 230", "Escalar OT 170 a Cristian por SLA vencido").
+5. CLASIFICAR urgencia honestamente:
+   - critical = SLA vencido o a <1h de vencer con multas activas
+   - high = OT bloqueada, maestro sin respuesta, cliente enojado, problema técnico en sitio
+   - normal = actualización rutinaria, preguntas de estado
+   - low = saludo, charla, consulta no operativa
 
-TU TRABAJO:
-1. Clasificar la intención del mensaje con precisión.
-2. Extraer el número de OT si se menciona (busca "OT 123", "orden 123", "#123").
-3. Evaluar urgencia: critical=SLA en riesgo o accidente; high=problema bloqueante; normal=actualización rutinaria; low=charla casual.
-4. Responder en español, profesional, conciso (máx 2 frases). Sin emojis excesivos (máx 1 si aporta).
-5. NUNCA mientas sobre acciones tomadas. Si solo recibimos el mensaje sin actualizar AppSheet, di "recibido y notificado al arquitecto", NO "actualización registrada en el sistema".
-6. Si te dan datos reales de la OT (estado actual, arquitecto asignado, deadline), úsalos en tu respuesta para sonar real.
-7. Marca needs_human=true si: el caso requiere decisión humana, hay ambigüedad, o el mensaje es complejo.
+REGLAS DURAS:
+- NUNCA mientas sobre acciones tomadas. Si solo diste info, NO digas "actualización registrada" ni "ya notifiqué al arquitecto" — solo di lo que realmente pasó.
+- RESPUESTAS CORTAS Y DENSAS. Máximo 3 frases o 4 bullets. Datos reales del briefing, no generalidades. Sin relleno corporativo ("hemos recibido su solicitud", "a la brevedad"). Directo.
+- Usa los NOMBRES REALES que ves en el briefing (arquitectos, ciudades, clientes, números de OT).
+- El usuario es experto — no expliques lo obvio.
+- Si el briefing muestra algo crítico no relacionado a la pregunta pero que el usuario debe saber, SURFACEALO al final: "— Nota: OT 170 Neiva tiene SLA vencido, requiere atención."
 
-FORMATO DE SALIDA: JSON estructurado según el esquema dado. NO agregues markdown ni texto fuera del JSON.`;
+FORMATO: JSON estructurado. Nada fuera del JSON.`;
 
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
@@ -71,49 +78,36 @@ const RESPONSE_SCHEMA = {
     intent: {
       type: Type.STRING,
       enum: [
+        "operational_query",
+        "status_request",
+        "action_request",
         "completion_report",
         "problem_report",
         "progress_update",
-        "start_work",
-        "photo_evidence",
         "schedule_request",
         "payment_question",
         "quote_question",
-        "general_question",
         "general_chat",
         "unknown",
       ],
-      description: "Tipo de intención principal del mensaje",
     },
-    ot_number: {
-      type: Type.STRING,
-      nullable: true,
-      description: "Número de OT mencionado (solo dígitos), o null",
-    },
-    urgency: {
-      type: Type.STRING,
-      enum: ["critical", "high", "normal", "low"],
-      description: "Nivel de urgencia",
-    },
-    needs_human: {
-      type: Type.BOOLEAN,
-      description: "True si requiere intervención humana de un arquitecto",
-    },
-    summary: {
-      type: Type.STRING,
-      description: "Resumen en una línea de qué dijo el remitente, en español",
-    },
+    ot_number: { type: Type.STRING, nullable: true },
+    urgency: { type: Type.STRING, enum: ["critical", "high", "normal", "low"] },
+    needs_human: { type: Type.BOOLEAN },
+    summary: { type: Type.STRING, description: "Resumen en una línea" },
     reply: {
       type: Type.STRING,
-      description: "Respuesta en español para enviar al remitente. Máx 2 frases. Profesional y honesta.",
+      description:
+        "Respuesta densa y accionable en español. Usa datos reales del briefing. Máx 3 frases o 4 bullets. Sin relleno corporativo.",
     },
-    confidence: {
-      type: Type.STRING,
-      enum: ["high", "medium", "low"],
-      description: "Qué tan seguro estás de la clasificación",
+    suggested_actions: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: "Acciones concretas que el arquitecto/gerente puede tomar ahora. 0-4 items. Frases imperativas cortas.",
     },
+    confidence: { type: Type.STRING, enum: ["high", "medium", "low"] },
   },
-  required: ["intent", "ot_number", "urgency", "needs_human", "summary", "reply", "confidence"],
+  required: ["intent", "ot_number", "urgency", "needs_human", "summary", "reply", "suggested_actions", "confidence"],
 };
 
 let client: GoogleGenAI | null = null;
@@ -132,27 +126,13 @@ export function isLLMConfigured(): boolean {
 
 function buildUserPrompt(input: InterpretInput): string {
   const parts: string[] = [];
-  parts.push(`Mensaje recibido por WhatsApp:`);
-  parts.push(`De: ${input.senderName || "(sin nombre)"} (${input.senderPhone})`);
-  parts.push(`Texto: """${input.message || "(sin texto)"}"""`);
-  if (input.hasPhotos) parts.push(`Adjuntos: el mensaje incluye foto(s).`);
-
-  if (input.ot) {
-    const ot = input.ot;
-    parts.push(`\nDATOS REALES DE LA OT MENCIONADA (úsalos en tu respuesta para sonar real):`);
-    parts.push(`- Número: #${ot.Numero_Orden}`);
-    parts.push(`- Estado actual: ${ot.Estado}`);
-    parts.push(`- Ciudad: ${ot.Ciudad}`);
-    parts.push(`- Cliente: ${ot.ID_Cliente}`);
-    parts.push(`- Arquitecto asignado: ${ot.Nombre_Arquitecto_Real || "(sin asignar)"}`);
-    if (ot.Descripcion) parts.push(`- Descripción: ${ot.Descripcion.substring(0, 200)}`);
-    if (ot.Fecha_Limite_Solucion) parts.push(`- Deadline solución (Inter Rapidísimo): ${ot.Fecha_Limite_Solucion}`);
-    if (ot.Alerta_Respuesta) parts.push(`- Alerta respuesta SLA: ${ot.Alerta_Respuesta}`);
-    if (ot.Alerta_Solucion) parts.push(`- Alerta solución SLA: ${ot.Alerta_Solucion}`);
-  } else if (input.message.match(/(?:ot|orden|#)\s*(\d+)/i)) {
-    parts.push(`\nEl remitente menciona una OT pero no se encontró en AppSheet. Pídele que confirme el número.`);
-  }
-
+  parts.push(`REMITENTE: ${input.senderName || "(sin nombre)"} (${input.senderPhone}) — rol detectado: ${input.senderRole}`);
+  parts.push(`MENSAJE: """${input.message || "(sin texto)"}"""`);
+  if (input.hasPhotos) parts.push(`ADJUNTOS: el mensaje incluye foto(s).`);
+  parts.push(`\n=== ${input.opsContext} ===\n`);
+  parts.push(
+    `Responde al mensaje del remitente usando el briefing de arriba. Si el mensaje es una consulta operativa, responde con datos reales. Si reporta algo, sugiere próximos pasos concretos.`
+  );
   return parts.join("\n");
 }
 
@@ -167,8 +147,8 @@ export async function interpretWithLLM(input: InterpretInput): Promise<IntentRes
       systemInstruction: SYSTEM_PROMPT,
       responseMimeType: "application/json",
       responseSchema: RESPONSE_SCHEMA,
-      temperature: 0.2,
-      maxOutputTokens: 600,
+      temperature: 0.3,
+      maxOutputTokens: 800,
     },
   });
 
@@ -182,11 +162,10 @@ export async function interpretWithLLM(input: InterpretInput): Promise<IntentRes
 
   const parsed = JSON.parse(text) as IntentResult;
 
-  // Defensive normalization
   if (parsed.ot_number === "null" || parsed.ot_number === "") parsed.ot_number = null;
   if (typeof parsed.needs_human !== "boolean") parsed.needs_human = false;
+  if (!Array.isArray(parsed.suggested_actions)) parsed.suggested_actions = [];
 
-  // Cost tracking (Gemini 2.5 Flash pricing as of 2026: ~$0.075/1M input, $0.30/1M output)
   const usage = response.usageMetadata;
   if (usage) {
     const inTok = usage.promptTokenCount || 0;
