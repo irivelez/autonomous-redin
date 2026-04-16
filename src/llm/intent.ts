@@ -136,6 +136,59 @@ function buildUserPrompt(input: InterpretInput): string {
   return parts.join("\n");
 }
 
+/**
+ * Gemini sometimes emits literal control chars (\n, \r, \t) inside string
+ * values, which breaks JSON.parse. Walk the text and escape control chars
+ * only when we're inside an unescaped string. Idempotent on already-valid JSON.
+ */
+function sanitizeLLMJSON(text: string): string {
+  let out = "";
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (escape) {
+      out += c;
+      escape = false;
+      continue;
+    }
+    if (c === "\\") {
+      out += c;
+      escape = true;
+      continue;
+    }
+    if (c === '"') {
+      inString = !inString;
+      out += c;
+      continue;
+    }
+    if (inString) {
+      if (c === "\n") out += "\\n";
+      else if (c === "\r") out += "\\r";
+      else if (c === "\t") out += "\\t";
+      else out += c;
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+function parseLLMJSON<T>(text: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const sanitized = sanitizeLLMJSON(text);
+    try {
+      return JSON.parse(sanitized) as T;
+    } catch (err2) {
+      console.error("[LLM] Raw response that failed to parse (first 1500 chars):");
+      console.error(text.substring(0, 1500));
+      throw err2;
+    }
+  }
+}
+
 export async function interpretWithLLM(input: InterpretInput): Promise<IntentResult> {
   const ai = getClient();
   const userPrompt = buildUserPrompt(input);
@@ -160,7 +213,7 @@ export async function interpretWithLLM(input: InterpretInput): Promise<IntentRes
   const text = response.text;
   if (!text) throw new Error("Gemini returned empty response");
 
-  const parsed = JSON.parse(text) as IntentResult;
+  const parsed = parseLLMJSON<IntentResult>(text);
 
   if (parsed.ot_number === "null" || parsed.ot_number === "") parsed.ot_number = null;
   if (typeof parsed.needs_human !== "boolean") parsed.needs_human = false;
