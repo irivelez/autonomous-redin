@@ -3,11 +3,22 @@ import QRCode from "qrcode";
 import type { WhatsAppClient } from "../clients/whatsapp.js";
 
 const REFRESH_SECONDS = 15;
+const COOKIE_NAME = "pair_token";
+const COOKIE_MAX_AGE = 60 * 60; // 1 hour
 
 interface PairServerOptions {
   port: number;
   whatsapp: WhatsAppClient;
   authToken?: string;
+}
+
+function readCookie(header: string | undefined, name: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === name) return decodeURIComponent(rest.join("="));
+  }
+  return null;
 }
 
 export function startPairServer(opts: PairServerOptions): http.Server {
@@ -16,17 +27,30 @@ export function startPairServer(opts: PairServerOptions): http.Server {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
+    let authedViaQuery = false;
     if (authToken) {
-      const provided = url.searchParams.get("t") || req.headers["x-pair-token"];
+      const fromQuery = url.searchParams.get("t");
+      const fromHeader = req.headers["x-pair-token"] as string | undefined;
+      const fromCookie = readCookie(req.headers.cookie, COOKIE_NAME);
+      const provided = fromQuery || fromHeader || fromCookie;
       if (provided !== authToken) {
         res.writeHead(401, { "Content-Type": "text/plain" });
         res.end("Unauthorized — append ?t=<PAIR_TOKEN> to the URL");
         return;
       }
+      authedViaQuery = !!fromQuery;
+    }
+
+    // Set/refresh cookie when the request was authed via query/header — this lets
+    // the meta-refresh and <img> requests keep working even if the browser drops
+    // the query string on reload.
+    const setCookieHeader: Record<string, string> = {};
+    if (authToken && authedViaQuery) {
+      setCookieHeader["Set-Cookie"] = `${COOKIE_NAME}=${encodeURIComponent(authToken)}; Path=/; Max-Age=${COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax`;
     }
 
     if (url.pathname === "/healthz") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.writeHead(200, { "Content-Type": "text/plain", ...setCookieHeader });
       res.end(`state=${whatsapp.getConnectionState()}`);
       return;
     }
@@ -34,7 +58,7 @@ export function startPairServer(opts: PairServerOptions): http.Server {
     if (url.pathname === "/qr.png") {
       const qr = whatsapp.getLatestQR();
       if (!qr) {
-        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.writeHead(404, { "Content-Type": "text/plain", ...setCookieHeader });
         res.end("No QR available yet — refresh in a few seconds.");
         return;
       }
@@ -43,10 +67,11 @@ export function startPairServer(opts: PairServerOptions): http.Server {
         res.writeHead(200, {
           "Content-Type": "image/png",
           "Cache-Control": "no-store",
+          ...setCookieHeader,
         });
         res.end(png);
       } catch (err) {
-        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.writeHead(500, { "Content-Type": "text/plain", ...setCookieHeader });
         res.end("Error rendering QR: " + (err as Error).message);
       }
       return;
@@ -55,17 +80,17 @@ export function startPairServer(opts: PairServerOptions): http.Server {
     if (url.pathname === "/pair-code") {
       const phone = url.searchParams.get("phone");
       if (!phone) {
-        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.writeHead(400, { "Content-Type": "text/plain", ...setCookieHeader });
         res.end("Missing ?phone=<E.164 digits>");
         return;
       }
       try {
         const code = await whatsapp.requestPairingCode(phone);
         const formatted = code.match(/.{1,4}/g)?.join("-") || code;
-        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.writeHead(200, { "Content-Type": "text/plain", ...setCookieHeader });
         res.end(`Pairing code for ${phone}: ${formatted}\n\nIn WhatsApp on that phone:\nSettings → Linked Devices → Link with phone number → enter the code above.`);
       } catch (err) {
-        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.writeHead(500, { "Content-Type": "text/plain", ...setCookieHeader });
         res.end("Error requesting pairing code: " + (err as Error).message);
       }
       return;
@@ -74,17 +99,20 @@ export function startPairServer(opts: PairServerOptions): http.Server {
     if (url.pathname === "/" || url.pathname === "/pair") {
       const state = whatsapp.getConnectionState();
       const hasQR = !!whatsapp.getLatestQR();
+      // Always include the token in the refresh URL too — defense in depth in case
+      // a browser/proxy drops cookies on the meta-refresh.
       const tokenSuffix = authToken ? `?t=${encodeURIComponent(authToken)}` : "";
       const html = renderPage({ state, hasQR, tokenSuffix });
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
+        ...setCookieHeader,
       });
       res.end(html);
       return;
     }
 
-    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.writeHead(404, { "Content-Type": "text/plain", ...setCookieHeader });
     res.end("Not found");
   });
 
@@ -113,9 +141,12 @@ function renderPage(args: { state: string; hasQR: boolean; tokenSuffix: string }
     ? `<img src="/qr.png${tokenSuffix}" alt="QR de vinculación" width="360" height="360" />`
     : `<p><em>Esperando que Baileys genere el QR... la página se recarga sola.</em></p>`;
 
+  // Explicit URL in meta-refresh so the token query string is never dropped.
+  const refreshUrl = `/pair${tokenSuffix}`;
+
   return `<!doctype html><html><head><meta charset="utf-8">
 <title>Redin · Vincular WhatsApp</title>
-<meta http-equiv="refresh" content="${REFRESH_SECONDS}">
+<meta http-equiv="refresh" content="${REFRESH_SECONDS};url=${refreshUrl}">
 <style>
 body{font:16px/1.5 -apple-system,system-ui,sans-serif;max-width:560px;margin:40px auto;padding:0 20px;color:#0f172a}
 h1{font-size:22px;margin-bottom:4px}
