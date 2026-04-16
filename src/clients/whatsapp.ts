@@ -42,17 +42,43 @@ export class WhatsAppClient extends EventEmitter {
 
   private wipeAuthDir(): void {
     try {
-      if (fs.existsSync(AUTH_DIR)) {
-        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        console.log(`[WhatsApp] Auth directory wiped: ${AUTH_DIR}`);
+      if (!fs.existsSync(AUTH_DIR)) return;
+      // Delete contents only — the dir itself may be a mount point (EBUSY on rmdir)
+      for (const entry of fs.readdirSync(AUTH_DIR)) {
+        fs.rmSync(path.join(AUTH_DIR, entry), { recursive: true, force: true });
       }
+      console.log(`[WhatsApp] Auth directory contents wiped: ${AUTH_DIR}`);
     } catch (err) {
       console.error("[WhatsApp] Error wiping auth dir:", err);
     }
   }
 
+  private bootstrapFromEnv(): boolean {
+    const seed = process.env.WA_AUTH_BOOTSTRAP;
+    if (!seed) return false;
+    try {
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
+      // Skip if volume already has auth files
+      if (fs.readdirSync(AUTH_DIR).length > 0) {
+        console.log("[WhatsApp] Auth dir already populated, skipping bootstrap.");
+        return false;
+      }
+      const buf = Buffer.from(seed, "base64");
+      const files: Record<string, string> = JSON.parse(buf.toString("utf-8"));
+      for (const [name, content] of Object.entries(files)) {
+        fs.writeFileSync(path.join(AUTH_DIR, name), content, "utf-8");
+      }
+      console.log(`[WhatsApp] Bootstrapped ${Object.keys(files).length} auth files from WA_AUTH_BOOTSTRAP env var.`);
+      return true;
+    } catch (err) {
+      console.error("[WhatsApp] Error bootstrapping auth from env:", err);
+      return false;
+    }
+  }
+
   private async createConnection(): Promise<void> {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
+    this.bootstrapFromEnv();
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`[WhatsApp] Using WA v${version.join(".")} (latest: ${isLatest})`);
