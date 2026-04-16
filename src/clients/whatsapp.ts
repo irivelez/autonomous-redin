@@ -7,7 +7,7 @@ import makeWASocket, {
   downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
-import * as qrcode from "qrcode-terminal";
+import qrcode from "qrcode-terminal";
 import { EventEmitter } from "events";
 import path from "path";
 import fs from "fs";
