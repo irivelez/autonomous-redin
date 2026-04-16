@@ -66,8 +66,15 @@ Baileys is not webhook-based. It maintains a persistent WebSocket connection to 
    MANAGER_WHATSAPP=573166222563
    WA_AUTH_DIR=/data/whatsapp-auth
    PAIR_TOKEN=<random 24+ char string>      # protects /pair URL — anyone who hits it without ?t=<token> gets 401
+   GEMINI_API_KEY=<key from aistudio.google.com/apikey>   # LLM for message interpretation
    ```
    `PORT` is auto-injected by Railway — do not set it manually.
+
+   **Get a Gemini API key:**
+   1. Go to https://aistudio.google.com/apikey
+   2. Sign in with any Google account → "Create API key" → copy the key
+   3. Free tier covers Redin's volume (Gemini 2.5 Flash: ~1500 requests/day free; Redin handles ~100 OTs/month → well under)
+   4. If you skip this step, the agent runs in safe-fallback mode (acknowledges messages but does not pretend to register them)
 
 4. **Attach a persistent volume** (critical for WhatsApp auth):
    - Railway dashboard → Settings → Volumes → New Volume

@@ -10,6 +10,7 @@
     "pair": "tsx src/cli/pair.ts"
   },
   "dependencies": {
+    "@google/genai": "^1.50.1",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "dotenv": "^16.5.0",
     "node-cron": "^3.0.3",

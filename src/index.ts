@@ -2,8 +2,10 @@ import "dotenv/config";
 import { AppSheetClient } from "./clients/appsheet.js";
 import { WhatsAppClient, type IncomingMessage } from "./clients/whatsapp.js";
 import { ExecutionMonitor, formatAlerts } from "./tracker/monitor.js";
-import { interpretMessage, generateReply } from "./tracker/interpreter.js";
+import { interpretMessage } from "./tracker/interpreter.js";
 import { startPairServer } from "./cli/pair-server.js";
+import { interpretWithLLM, isLLMConfigured, type IntentResult } from "./llm/intent.js";
+import { extractOTNumber, fetchOTContext } from "./llm/context.js";
 import cron from "node-cron";
 
 const appsheet = new AppSheetClient({
@@ -14,22 +16,82 @@ const appsheet = new AppSheetClient({
 const whatsapp = new WhatsAppClient();
 const monitor = new ExecutionMonitor(appsheet);
 
+async function runLLMInterpretation(msg: IncomingMessage): Promise<IntentResult> {
+  const otNumber = extractOTNumber(msg.body);
+  const ot = otNumber ? await fetchOTContext(appsheet, otNumber) : null;
+
+  return interpretWithLLM({
+    message: msg.body,
+    hasPhotos: msg.mediaBuffers.length > 0,
+    senderName: msg.profileName,
+    senderPhone: msg.from,
+    ot,
+  });
+}
+
+function fallbackReply(msg: IncomingMessage): { reply: string; needsAlert: boolean; otNumber: string | null } {
+  // Honest fallback: do NOT pretend to register anything. Just acknowledge and route.
+  const update = interpretMessage(msg);
+  const safeReply = "📩 Mensaje recibido. Un arquitecto te responderá pronto.";
+  return {
+    reply: safeReply,
+    needsAlert: update.type === "problem_report",
+    otNumber: update.otNumber || null,
+  };
+}
+
 const handleMessage = async (msg: IncomingMessage): Promise<string | null> => {
   if (msg.isGroup) return null;
 
-  const update = interpretMessage(msg);
-  console.log(`[Interpreter] Type: ${update.type}, OT: ${update.otNumber || "?"}, Status: ${update.status || "—"}`);
+  const senderLabel = msg.profileName || msg.from;
+  const managerPhone = process.env.MANAGER_WHATSAPP;
+  let reply: string;
+  let needsAlert = false;
+  let alertSummary = "";
+  let otRef: string | null = null;
+  let urgency: string = "normal";
 
-  const reply = generateReply(update);
-
-  if (update.type === "problem_report") {
-    const alertMsg = `🚨 PROBLEMA reportado por ${msg.profileName || msg.from}\n` +
-      `OT: ${update.otNumber || "no especificado"}\n` +
-      `Mensaje: ${update.description}`;
-    const managerPhone = process.env.MANAGER_WHATSAPP;
-    if (managerPhone) {
-      await whatsapp.sendMessage(managerPhone, alertMsg).catch(console.error);
+  if (isLLMConfigured()) {
+    try {
+      const result = await runLLMInterpretation(msg);
+      console.log(
+        `[LLM] intent=${result.intent} ot=${result.ot_number || "?"} urgency=${result.urgency} ` +
+          `confidence=${result.confidence} needs_human=${result.needs_human}`
+      );
+      console.log(`[LLM] summary: ${result.summary}`);
+      reply = result.reply;
+      otRef = result.ot_number;
+      urgency = result.urgency;
+      needsAlert =
+        result.urgency === "critical" ||
+        (result.urgency === "high" && result.needs_human) ||
+        result.intent === "problem_report";
+      alertSummary = result.summary;
+    } catch (err) {
+      console.error("[LLM] failed, using safe fallback:", (err as Error).message);
+      const fb = fallbackReply(msg);
+      reply = fb.reply;
+      needsAlert = fb.needsAlert;
+      otRef = fb.otNumber;
+      alertSummary = msg.body.substring(0, 200);
     }
+  } else {
+    console.warn("[LLM] GEMINI_API_KEY not set — using safe fallback (no false 'registered' replies)");
+    const fb = fallbackReply(msg);
+    reply = fb.reply;
+    needsAlert = fb.needsAlert;
+    otRef = fb.otNumber;
+    alertSummary = msg.body.substring(0, 200);
+  }
+
+  if (needsAlert && managerPhone) {
+    const icon = urgency === "critical" ? "🚨" : "⚠️";
+    const alertMsg =
+      `${icon} ${urgency.toUpperCase()} — mensaje de ${senderLabel}\n` +
+      `OT: ${otRef || "no especificado"}\n` +
+      `Resumen: ${alertSummary}\n` +
+      `Texto original: ${msg.body.substring(0, 300)}`;
+    await whatsapp.sendMessage(managerPhone, alertMsg).catch(console.error);
   }
 
   return reply;
