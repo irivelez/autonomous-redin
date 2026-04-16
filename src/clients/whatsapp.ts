@@ -1,8 +1,9 @@
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
+  fetchLatestBaileysVersion,
+  Browsers,
   type WASocket,
-  type BaileysEventMap,
   downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
@@ -42,10 +43,13 @@ export class WhatsAppClient extends EventEmitter {
   private async createConnection(): Promise<void> {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`[WhatsApp] Using WA v${version.join(".")} (latest: ${isLatest})`);
 
     const sock = makeWASocket({
+      version,
       auth: state,
-      browser: ["Redin Tracker", "Agent", "1.0.0"],
+      browser: Browsers.macOS("Desktop"),
       syncFullHistory: false,
       markOnlineOnConnect: false,
       printQRInTerminal: false,
@@ -54,6 +58,25 @@ export class WhatsAppClient extends EventEmitter {
     this.sock = sock;
 
     sock.ev.on("creds.update", saveCreds);
+
+    // Pairing code flow: if PAIRING_PHONE env var is set, request a pairing code
+    // instead of QR. Enter the 8-digit code in WhatsApp → Linked Devices → Link with phone number.
+    const pairingPhone = process.env.PAIRING_PHONE;
+    if (pairingPhone && !sock.authState.creds.registered) {
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(pairingPhone.replace(/[^0-9]/g, ""));
+          console.log(`\n[WhatsApp] ═══════════════════════════════════════`);
+          console.log(`[WhatsApp] CÓDIGO DE VINCULACIÓN: ${code}`);
+          console.log(`[WhatsApp] ═══════════════════════════════════════`);
+          console.log(`[WhatsApp] En WhatsApp del teléfono ${pairingPhone}:`);
+          console.log(`[WhatsApp] Ajustes → Dispositivos vinculados → Vincular con número de teléfono`);
+          console.log(`[WhatsApp] Ingresa el código arriba.\n`);
+        } catch (err) {
+          console.error("[WhatsApp] Error solicitando pairing code:", err);
+        }
+      }, 3000);
+    }
 
     sock.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr } = update;
