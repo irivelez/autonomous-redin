@@ -73,9 +73,15 @@ async function main() {
       // Give Baileys a moment to write the final creds
       await new Promise((r) => setTimeout(r, 2000));
 
+      // Only export essential files. Baileys regenerates pre-keys, sessions,
+      // and device-list entries automatically. creds.json holds the master
+      // credentials needed to reauthenticate.
+      const ESSENTIAL = new Set(["creds.json"]);
       const files: Record<string, string> = {};
       for (const name of fs.readdirSync(AUTH_DIR)) {
-        files[name] = fs.readFileSync(path.join(AUTH_DIR, name), "utf-8");
+        if (ESSENTIAL.has(name)) {
+          files[name] = fs.readFileSync(path.join(AUTH_DIR, name), "utf-8");
+        }
       }
 
       const encoded = Buffer.from(JSON.stringify(files), "utf-8").toString("base64");
