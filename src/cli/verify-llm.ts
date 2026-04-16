@@ -37,7 +37,9 @@ async function main() {
   const bundle = await buildOpsBundle(appsheet, otNumber);
   const t1 = Date.now();
   console.log(`     ✓ done in ${t1 - t0}ms`);
-  console.log(`     Active OTs: ${bundle.totals.allActive}`);
+  console.log(`     Active OTs: ${bundle.totals.active}`);
+  console.log(`     Total (incluye históricas): ${bundle.totals.total}`);
+  console.log(`     Facturado: ${bundle.totals.facturado} | Pagado: ${bundle.totals.pagado} | Cancelado: ${bundle.totals.cancelado}`);
   console.log(`     Critical alerts: ${bundle.critical.length}`);
   console.log(`     Inter Rapidísimo active: ${bundle.totals.interOTsActive}`);
   console.log(`     By architect:`, bundle.byArchitect);
