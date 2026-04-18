@@ -7,9 +7,7 @@ RUN npm ci --omit=dev || npm install --omit=dev
 
 COPY . .
 
-RUN mkdir -p /data/whatsapp-auth
-ENV WA_AUTH_DIR=/data/whatsapp-auth
-
-EXPOSE 3000
+RUN mkdir -p /data/telegram
+ENV TELEGRAM_DATA_DIR=/data/telegram
 
 CMD ["npx", "tsx", "src/index.ts"]

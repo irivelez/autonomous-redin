@@ -1,27 +1,25 @@
 {
   "name": "@redin/execution-tracker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "monitor": "tsx src/cli/monitor.ts",
     "dashboard": "tsx src/cli/dashboard.ts",
-    "pair": "tsx src/cli/pair.ts"
+    "verify": "tsx src/cli/verify-llm.ts",
+    "simulate": "tsx src/cli/simulate-concurrent.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@google/genai": "^1.50.1",
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "dotenv": "^16.5.0",
-    "node-cron": "^3.0.3",
-    "qrcode": "^1.5.4",
-    "qrcode-terminal": "^0.12.0"
+    "grammy": "^1.42.0",
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/node-cron": "^3.0.11",
-    "@types/qrcode": "^1.5.6",
-    "@types/qrcode-terminal": "^0.12.2",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }

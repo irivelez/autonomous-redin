@@ -9,4 +9,4 @@ restartPolicyMaxRetries = 10
 
 [[deploy.volumes]]
 name = "whatsapp-auth"
-mountPath = "/data/whatsapp-auth"
+mountPath = "/data/telegram"

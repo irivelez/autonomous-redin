@@ -1,11 +1,20 @@
 import { AppSheetClient, TABLES, ESTADOS, type OrdenTrabajo } from "../clients/appsheet.js";
 import { ExecutionMonitor, type TrackerAlert } from "../tracker/monitor.js";
+import { appsheetDateToISO, monthInBogota, todayInBogota } from "./date-utils.js";
 
 /**
  * Complete operational snapshot of Redin. The LLM gets the FULL OT table
  * (all states, including terminal/billed/paid) plus computed alerts. Lets
  * the agent answer any question about any OT without us pre-curating data.
  */
+export interface FinancialAggregate {
+  count: number;
+  sumFacturadoReal: number;
+  sumEstimado: number;
+  sumRentabilidad: number;
+  otNumbers: string[];
+}
+
 export interface OpsBundle {
   generatedAt: Date;
   totals: {
@@ -19,6 +28,12 @@ export interface OpsBundle {
     cancelado: number;
     interOTsActive: number;
   };
+  aggregates: {
+    facturadoHoy: FinancialAggregate;
+    facturadoEsteMes: FinancialAggregate;
+    pagadoHoy: FinancialAggregate;
+    pagadoEsteMes: FinancialAggregate;
+  };
   byArchitect: Record<string, number>;
   byClient: Record<string, number>;
   byState: Record<string, number>;
@@ -30,22 +45,39 @@ export interface OpsBundle {
 
 const CACHE_TTL_MS = 60_000;
 let cache: { bundle: OpsBundle; at: number } | null = null;
+// Single-flight: if 20 users miss the cache at once, they share one AppSheet fetch.
+let inflight: Promise<OpsBundle> | null = null;
 
 const QUOTE_STATES = new Set<string>([ESTADOS.COTIZACION, ESTADOS.REPLANTEO]);
 const EXEC_STATES = new Set<string>([ESTADOS.COORDINAR, ESTADOS.EJECUCION, ESTADOS.POR_APROBAR]);
 const TERMINAL_STATES = new Set<string>([ESTADOS.FACTURADO, ESTADOS.PAGADO, ESTADOS.PERDIDA]);
+
+function withFocus(bundle: OpsBundle, focusOTNumber?: string | null): OpsBundle {
+  const b = { ...bundle };
+  b.focusOT = focusOTNumber
+    ? bundle.allOTs.find((o) => o.Numero_Orden === focusOTNumber) || null
+    : null;
+  return b;
+}
 
 export async function buildOpsBundle(
   appsheet: AppSheetClient,
   focusOTNumber?: string | null
 ): Promise<OpsBundle> {
   const now = Date.now();
-  if (cache && now - cache.at < CACHE_TTL_MS) {
-    const b = { ...cache.bundle };
-    if (focusOTNumber) b.focusOT = cache.bundle.allOTs.find((o) => o.Numero_Orden === focusOTNumber) || null;
-    return b;
-  }
+  if (cache && now - cache.at < CACHE_TTL_MS) return withFocus(cache.bundle, focusOTNumber);
+  if (inflight) return withFocus(await inflight, focusOTNumber);
 
+  inflight = fetchBundle(appsheet);
+  try {
+    const bundle = await inflight;
+    return withFocus(bundle, focusOTNumber);
+  } finally {
+    inflight = null;
+  }
+}
+
+async function fetchBundle(appsheet: AppSheetClient): Promise<OpsBundle> {
   const monitor = new ExecutionMonitor(appsheet);
   const [allOTs, alerts] = await Promise.all([
     appsheet.find<OrdenTrabajo>(TABLES.ORDENES),
@@ -79,21 +111,41 @@ export async function buildOpsBundle(
   const critical = alerts.filter((a) => a.severity === "critical");
   const high = alerts.filter((a) => a.severity === "high");
 
+  const today = todayInBogota();
+  const month = monthInBogota();
+  const aggregates = {
+    facturadoHoy: aggregate(allOTs, (o) => {
+      const d = appsheetDateToISO(o.Fecha_Facturacion);
+      return (o.Estado === ESTADOS.FACTURADO || o.Estado === ESTADOS.PAGADO) && d === today;
+    }),
+    facturadoEsteMes: aggregate(allOTs, (o) => {
+      const d = appsheetDateToISO(o.Fecha_Facturacion);
+      return (o.Estado === ESTADOS.FACTURADO || o.Estado === ESTADOS.PAGADO) && d.startsWith(month);
+    }),
+    pagadoHoy: aggregate(allOTs, (o) => {
+      const d = appsheetDateToISO(o.Fecha_Pago_Real);
+      return o.Estado === ESTADOS.PAGADO && d === today;
+    }),
+    pagadoEsteMes: aggregate(allOTs, (o) => {
+      const d = appsheetDateToISO(o.Fecha_Pago_Real);
+      return o.Estado === ESTADOS.PAGADO && d.startsWith(month);
+    }),
+  };
+
   const bundle: OpsBundle = {
     generatedAt: new Date(),
     totals,
+    aggregates,
     byArchitect,
     byClient,
     byState,
     critical,
     high,
     allOTs,
-    focusOT: focusOTNumber
-      ? allOTs.find((o) => o.Numero_Orden === focusOTNumber) || null
-      : null,
+    focusOT: null,
   };
 
-  cache = { bundle, at: now };
+  cache = { bundle, at: Date.now() };
   return bundle;
 }
 
@@ -101,12 +153,45 @@ export function invalidateOpsCache(): void {
   cache = null;
 }
 
-/** YYYY-MM-DD or empty string for invalid/missing dates. */
-function isoDate(s: string): string {
-  if (!s) return "";
-  const d = new Date(s);
-  if (isNaN(d.getTime())) return "";
-  return d.toISOString().slice(0, 10);
+// Timezone-safe AppSheet date parsing (see llm/date-utils.ts).
+const isoDate = appsheetDateToISO;
+
+function aggregate(rows: OrdenTrabajo[], pred: (o: OrdenTrabajo) => boolean): FinancialAggregate {
+  let sumFact = 0;
+  let sumEst = 0;
+  let sumRent = 0;
+  const nums: string[] = [];
+  for (const o of rows) {
+    if (!pred(o)) continue;
+    sumFact += parseFloat(o.Valor_Facturado_Real || "0") || 0;
+    sumEst += parseFloat(o.Valor_Estimado || "0") || 0;
+    sumRent += parseFloat(o.Rentabilidad_Actual || "0") || 0;
+    nums.push(o.Numero_Orden);
+  }
+  return {
+    count: nums.length,
+    sumFacturadoReal: Math.round(sumFact),
+    sumEstimado: Math.round(sumEst),
+    sumRentabilidad: Math.round(sumRent),
+    otNumbers: nums,
+  };
+}
+
+function fmtCOP(n: number): string {
+  return `$${n.toLocaleString("es-CO")}`;
+}
+
+function renderAggregate(label: string, a: FinancialAggregate): string {
+  if (a.count === 0) return `${label}: 0 OTs.`;
+  const list = a.otNumbers.slice(0, 30).map((n) => `#${n}`).join(", ");
+  const more = a.otNumbers.length > 30 ? ` … y ${a.otNumbers.length - 30} más` : "";
+  return (
+    `${label}: ${a.count} OTs | ` +
+    `valor_facturado_real total = ${fmtCOP(a.sumFacturadoReal)} | ` +
+    `valor_estimado total = ${fmtCOP(a.sumEstimado)} | ` +
+    `rentabilidad total = ${fmtCOP(a.sumRentabilidad)} | ` +
+    `OTs: ${list}${more}`
+  );
 }
 
 /**
@@ -141,17 +226,28 @@ function rowOf(ot: OrdenTrabajo): string {
 
 export function renderBundleForPrompt(bundle: OpsBundle): string {
   const parts: string[] = [];
-  const today = bundle.generatedAt.toISOString().slice(0, 10);
-  const month = today.slice(0, 7);
+  // Dates are computed in Colombia timezone. All OT dates in the table below
+  // are also Colombia local time. So "today" / "este mes" filters compare
+  // like-with-like — no TZ drift.
+  const today = todayInBogota(bundle.generatedAt);
+  const month = monthInBogota(bundle.generatedAt);
   const t = bundle.totals;
 
   parts.push(`=== BRIEFING OPERATIVO REDIN ===`);
-  parts.push(`Fecha actual: ${today} (este mes = ${month})`);
+  parts.push(`Fecha actual (Colombia / COT): ${today} (este mes = ${month})`);
   parts.push(`Generado: ${bundle.generatedAt.toLocaleString("es-CO", { timeZone: "America/Bogota" })}`);
   parts.push(``);
   parts.push(
     `TOTALES: ${t.total} OTs en histórico | Activas: ${t.active} | En ejecución: ${t.inExecution} | Por aprobar: ${t.pendingApproval} | Cotizaciones pendientes: ${t.pendingQuotes} | Facturado: ${t.facturado} | Pagado: ${t.pagado} | Cancelado: ${t.cancelado} | Inter Rapidísimo activas: ${t.interOTsActive}`
   );
+
+  // Pre-computed financial aggregates — use these sums DIRECTLY. Do NOT re-add
+  // row values yourself; LLM arithmetic across many numbers drifts.
+  parts.push(`\n=== AGREGADOS FINANCIEROS (calculados en backend, usar tal cual) ===`);
+  parts.push(renderAggregate(`Facturado HOY (${today})`, bundle.aggregates.facturadoHoy));
+  parts.push(renderAggregate(`Facturado ESTE MES (${month})`, bundle.aggregates.facturadoEsteMes));
+  parts.push(renderAggregate(`Pagado HOY (${today})`, bundle.aggregates.pagadoHoy));
+  parts.push(renderAggregate(`Pagado ESTE MES (${month})`, bundle.aggregates.pagadoEsteMes));
 
   parts.push(`\nPor arquitecto (incluye históricas):`);
   for (const [name, count] of Object.entries(bundle.byArchitect).sort((a, b) => b[1] - a[1])) {
@@ -201,10 +297,12 @@ export function renderBundleForPrompt(bundle: OpsBundle): string {
   parts.push(`\n=== TABLA COMPLETA DE OTs (n=${bundle.allOTs.length}) ===`);
   parts.push(`Columnas (pipe-delimited): num | estado | cliente | ciudad | arquitecto | valor_estimado_cop | fecha_creacion | fecha_facturacion | fecha_pago | valor_facturado_cop | rentabilidad_cop | categoria | sla`);
   parts.push(`Notas:`);
-  parts.push(`  - Fechas en formato ISO YYYY-MM-DD; vacío = aún no ocurrió.`);
-  parts.push(`  - Valores en COP (pesos colombianos), no en miles.`);
+  parts.push(`  - Fechas en formato ISO YYYY-MM-DD en zona horaria de Colombia; vacío = aún no ocurrió.`);
+  parts.push(`  - Valores en COP (pesos colombianos), no en miles. "valor_facturado_cop" = Valor_Facturado_Real (lo que realmente se le cobró al cliente, no la estimación).`);
   parts.push(`  - sla solo aplica a Inter Rapidísimo. R=Respuesta, S=Solución. ❌=vencido, ⚠️=cerca de vencer, ✅=ok.`);
-  parts.push(`  - Para "este mes facturadas" filtra fecha_facturacion que empiece con ${month}.`);
+  parts.push(`  - "facturadas este mes" → filtra estado in [Facturado, Pagado] AND fecha_facturacion empieza con ${month}. Suma valor_facturado_cop.`);
+  parts.push(`  - "facturadas hoy" → filtra estado in [Facturado, Pagado] AND fecha_facturacion == ${today}. Suma valor_facturado_cop.`);
+  parts.push(`  - OJO: algunos rows de estado "Solicitud" traen fecha_facturacion no-vacía por artefactos de AppSheet. SIEMPRE filtra por estado también.`);
   parts.push(``);
   // Sort by state then by number desc — newest active first, terminal last
   const stateOrder: Record<string, number> = {
