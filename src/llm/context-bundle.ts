@@ -1,4 +1,12 @@
-import { AppSheetClient, TABLES, ESTADOS, type OrdenTrabajo } from "../clients/appsheet.js";
+import {
+  AppSheetClient,
+  TABLES,
+  ESTADOS,
+  type OrdenTrabajo,
+  type DetalleActividad,
+  type CostoEjecucion,
+  type Tecnico,
+} from "../clients/appsheet.js";
 import { ExecutionMonitor, type TrackerAlert } from "../tracker/monitor.js";
 import { appsheetDateToISO, monthInBogota, todayInBogota } from "./date-utils.js";
 
@@ -40,6 +48,11 @@ export interface OpsBundle {
   critical: TrackerAlert[];
   high: TrackerAlert[];
   allOTs: OrdenTrabajo[];
+  allActividades: DetalleActividad[];
+  allCostos: CostoEjecucion[];
+  allTecnicos: Tecnico[];
+  /** Map OT Row-ID (UUID) → Numero_Orden ("306"). Used to cross-join child tables back to OT numbers the user recognizes. */
+  otNumByRowId: Record<string, string>;
   focusOT?: OrdenTrabajo | null;
 }
 
@@ -79,10 +92,25 @@ export async function buildOpsBundle(
 
 async function fetchBundle(appsheet: AppSheetClient): Promise<OpsBundle> {
   const monitor = new ExecutionMonitor(appsheet);
-  const [allOTs, alerts] = await Promise.all([
+  const [allOTs, allActividades, allCostos, allTecnicos, alerts] = await Promise.all([
     appsheet.find<OrdenTrabajo>(TABLES.ORDENES),
+    appsheet.find<DetalleActividad>(TABLES.ACTIVIDADES).catch((e) => {
+      console.error("[Bundle] Actividades fetch failed:", (e as Error).message);
+      return [] as DetalleActividad[];
+    }),
+    appsheet.find<CostoEjecucion>(TABLES.COSTOS).catch((e) => {
+      console.error("[Bundle] Costos fetch failed:", (e as Error).message);
+      return [] as CostoEjecucion[];
+    }),
+    appsheet.find<Tecnico>(TABLES.TECNICOS).catch((e) => {
+      console.error("[Bundle] Tecnicos fetch failed:", (e as Error).message);
+      return [] as Tecnico[];
+    }),
     monitor.scan(),
   ]);
+
+  const otNumByRowId: Record<string, string> = {};
+  for (const ot of allOTs) otNumByRowId[ot["Row ID"]] = ot.Numero_Orden;
 
   const active = allOTs.filter((o) => !TERMINAL_STATES.has(o.Estado));
   const totals = {
@@ -142,6 +170,10 @@ async function fetchBundle(appsheet: AppSheetClient): Promise<OpsBundle> {
     critical,
     high,
     allOTs,
+    allActividades,
+    allCostos,
+    allTecnicos,
+    otNumByRowId,
     focusOT: null,
   };
 
@@ -318,5 +350,93 @@ export function renderBundleForPrompt(bundle: OpsBundle): string {
   });
   for (const ot of sorted) parts.push(rowOf(ot));
 
+  renderActividades(parts, bundle);
+  renderCostos(parts, bundle);
+  renderTecnicos(parts, bundle);
+
   return parts.join("\n");
+}
+
+// ─── Related tables ──────────────────────────────────────────────────────────
+
+function num(s: string | undefined): number {
+  return parseFloat(s || "0") || 0;
+}
+
+function renderActividades(parts: string[], bundle: OpsBundle): void {
+  parts.push(`\n=== TABLA DETALLE DE ACTIVIDADES (n=${bundle.allActividades.length}) ===`);
+  parts.push(
+    `Cada fila es una actividad/visita dentro de una OT — describe el trabajo concreto, el técnico asignado, el costo y el gasto aprobado.`
+  );
+  parts.push(
+    `Columnas (pipe-delimited): ot_num | id_detalle | actividad | categoria | subcategoria | tecnico | costo_cop | gasto_aprobado_cop | saldo_pendiente_cop | fecha_visita`
+  );
+  parts.push(`Notas:`);
+  parts.push(`  - "ot_num" es el #OT (usa esto para cruzar con la tabla OT arriba). Si "?" es que la actividad apunta a un ID_Orden que no existe en Ordenes_Trabajo.`);
+  parts.push(`  - "saldo_pendiente_cop" = gasto_aprobado - costo cobrado. >0 implica pago pendiente al técnico.`);
+  parts.push(``);
+  for (const a of bundle.allActividades) {
+    const otNum = bundle.otNumByRowId[a.ID_Orden] ?? "?";
+    parts.push(
+      [
+        `#${otNum}`,
+        a.ID_Detalle || "—",
+        (a.Actividad_Descripcion || "").substring(0, 80),
+        a.Categoria || "",
+        a.Subcategoria || "",
+        a.Tecnico || "—",
+        `$${Math.round(num(a.Costo))}`,
+        `$${Math.round(num(a.Gasto_Aprobado))}`,
+        `$${Math.round(num(a.Saldo_Pendiente_Item))}`,
+        appsheetDateToISO(a.Fecha_Hora_Visita),
+      ].join("|")
+    );
+  }
+}
+
+function renderCostos(parts: string[], bundle: OpsBundle): void {
+  parts.push(`\n=== TABLA COSTOS DE EJECUCIÓN (n=${bundle.allCostos.length}) ===`);
+  parts.push(
+    `Cada fila es un gasto/anticipo registrado contra una OT. Incluye anticipos dados a técnicos y materiales comprados. "Nombre_Visual_Anticipo" describe el anticipo en texto plano.`
+  );
+  parts.push(
+    `Columnas (pipe-delimited): ot_num | id_detalle | fecha_gasto | categoria | valor_cop | estado | anticipo_descripcion`
+  );
+  parts.push(`Notas:`);
+  parts.push(`  - "estado" = APROBADO | PENDIENTE | RECHAZADO (así viene de AppSheet).`);
+  parts.push(`  - "anticipo_descripcion" suele contener "Anticipo # - <categoría> - <técnico> - <n>-<estado OT>-<cliente>". Útil para preguntas sobre anticipos por OT/técnico/cliente.`);
+  parts.push(`  - Para "OTs con anticipo no facturado": filtra filas con estado=APROBADO, agrupa por ot_num, cruza con la tabla OT y excluye las que estén en estado Facturado o Pagado.`);
+  parts.push(``);
+  for (const c of bundle.allCostos) {
+    const otNum = bundle.otNumByRowId[c.ID_Orden] ?? "?";
+    parts.push(
+      [
+        `#${otNum}`,
+        c.ID_Detalle || "—",
+        appsheetDateToISO(c.Fecha_Gasto),
+        c.Categoria || "",
+        `$${Math.round(num(c.Valor_Gasto))}`,
+        c.ESTADO || "",
+        (c.Nombre_Visual_Anticipo || "").substring(0, 120),
+      ].join("|")
+    );
+  }
+}
+
+function renderTecnicos(parts: string[], bundle: OpsBundle): void {
+  parts.push(`\n=== TABLA TÉCNICOS (n=${bundle.allTecnicos.length}) ===`);
+  parts.push(`Directorio de maestros/técnicos. Usa para preguntas de contacto ("teléfono del maestro X").`);
+  parts.push(`Columnas (pipe-delimited): nombre | telefono | email | popularidad`);
+  parts.push(`  - "popularidad" es un ranking interno (más alto = más usado).`);
+  parts.push(``);
+  for (const t of bundle.allTecnicos) {
+    parts.push(
+      [
+        t["Nombre de Tecnico"] || "—",
+        t.Telefono || "",
+        t.EMAIL || "",
+        t.Popularidad_Tecnico || "0",
+      ].join("|")
+    );
+  }
 }

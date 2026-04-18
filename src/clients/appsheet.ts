@@ -100,10 +100,50 @@ export const TABLES = {
   CIUDADES: "Ciudades",
   CONTACTOS: "CONTACTOS",
   USUARIOS: "Usuarios",
+  ARQUITECTOS: "Arquitecto",
   DIRECCIONES: "BD_REDIN_Direcciones",
   COSTOS: "Costos_Ejecucion",
+  ACTIVIDADES: "Detalle de Actividades",
+  TECNICOS: "Tecnicos",
   PRESTAMOS: "PRESTAMOS",
 } as const;
+
+export interface DetalleActividad {
+  "Row ID": string;
+  ID_Detalle: string;
+  ID_Orden: string;
+  Actividad_Descripcion: string;
+  Categoria: string;
+  Subcategoria: string;
+  Tecnico: string;
+  Email_Tecnico: string;
+  Costo: string;
+  Gasto_Aprobado: string;
+  Saldo_Pendiente_Item: string;
+  Fecha_Hora_Visita: string;
+}
+
+export interface CostoEjecucion {
+  "Row ID": string;
+  ID_Costo: string;
+  ID_Orden: string;
+  ID_Detalle: string;
+  Fecha_Gasto: string;
+  Categoria: string;
+  Valor_Gasto: string;
+  ESTADO: string;
+  Numero_Consecutivo: string;
+  Nombre_Visual_Anticipo: string;
+  Evidencia: string;
+}
+
+export interface Tecnico {
+  "Row ID": string;
+  "Nombre de Tecnico": string;
+  EMAIL: string;
+  Telefono: string;
+  Popularidad_Tecnico: string;
+}
 
 // OT status values as they appear in the app
 export const ESTADOS = {
